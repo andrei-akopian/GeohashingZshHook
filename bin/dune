@@ -1,0 +1,4 @@
+(executable
+ (name geohash)
+ (public_name geohash)
+ (libraries unix))
