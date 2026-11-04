@@ -2,4 +2,4 @@
  (name main)
  (public_name geohash)
  (package geohash)
- (libraries geohash_lib unix))
+ (libraries geohash_lib unix lwt lwt.unix))

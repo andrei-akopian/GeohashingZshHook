@@ -99,15 +99,19 @@ let from_ipapi body =
       Some { g_lat; g_lon; place = place_of body [ "city"; "region"; "country_name" ] }
   | _ -> None
 
-let guess_from_ip ?tick () =
-  let providers = [ ("https://ipinfo.io/json", from_ipinfo); ("https://ipapi.co/json/", from_ipapi) ] in
+let guess_from_ip () : guess option Lwt.t =
+  let open Lwt.Syntax in
+  let providers =
+    [ ("https://ipinfo.io/json", from_ipinfo); ("https://ipapi.co/json/", from_ipapi) ]
+  in
   let rec go = function
-    | [] -> None
+    | [] -> Lwt.return None
     | (url, parse) :: rest -> (
-        match Http.get ?tick url with
+        let* r = Http.get url in
+        match r with
         | Ok (200, body) -> (
             match parse body with
-            | Some g when valid_lat g.g_lat && valid_lon g.g_lon -> Some g
+            | Some g when valid_lat g.g_lat && valid_lon g.g_lon -> Lwt.return (Some g)
             | _ -> go rest)
         | _ -> go rest)
   in

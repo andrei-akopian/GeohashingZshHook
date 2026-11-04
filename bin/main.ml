@@ -214,23 +214,31 @@ let render o hd r =
 
 (* ---------- direct mode ---------- *)
 
-let spinner msg =
-  if not (Unix.isatty Unix.stderr) then (ignore, ignore)
+(* Runs [p] to completion on the Lwt loop, animating a spinner on stderr
+   concurrently (only when stderr is a terminal and [show] is true). *)
+let with_spinner ?(show = true) msg (p : 'a Lwt.t) : 'a =
+  if not (show && Unix.isatty Unix.stderr) then Lwt_main.run p
   else begin
+    let open Lwt.Syntax in
     let frames = [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠧"; "⠇"; "⠏" |] in
-    let i = ref 0 in
     let clear () = prerr_string "\r\027[K"; flush stderr in
     (* restore the line if the user hits Ctrl-C mid-fetch *)
     Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ -> clear (); exit 130));
-    let tick () =
-      Printf.eprintf "\r%s %s" frames.(!i mod Array.length frames) msg;
+    let rec spin i =
+      Printf.eprintf "\r%s %s" frames.(i mod Array.length frames) msg;
       flush stderr;
-      incr i
+      let* () = Lwt_unix.sleep 0.08 in
+      spin (i + 1)
     in
-    (tick, clear)
+    let r = Lwt_main.run (Lwt.pick [ p; (let* () = spin 0 in Lwt.fail Exit) ]) in
+    clear ();
+    Sys.set_signal Sys.sigint Sys.Signal_default;
+    r
   end
 
-let fetch_all ?tick dates = List.map (fun d -> (d, Djia.fetch ?tick d)) dates
+(* all needed DJIA dates are fetched concurrently *)
+let fetch_all dates =
+  Lwt_list.map_p (fun d -> Lwt.map (fun r -> (d, r)) (Djia.fetch d)) dates
 
 let run_direct o =
   let hd = Option.value o.date ~default:(Geo.today ()) in
@@ -239,12 +247,8 @@ let run_direct o =
     | Some v -> fun _ -> v
     | None ->
         let dates = needed_dates o hd in
-        let tick, clear =
-          if List.for_all (fun d -> Djia.cached d <> None) dates then (ignore, ignore)
-          else spinner "Fetching Dow Jones opening…"
-        in
-        let results = fetch_all ~tick dates in
-        clear ();
+        let show = not (List.for_all (fun d -> Djia.cached d <> None) dates) in
+        let results = with_spinner ~show "Fetching Dow Jones opening…" (fetch_all dates) in
         List.iter
           (function
             | d, Error e -> prerr_endline (Djia.error_message d e); exit 1
@@ -300,7 +304,7 @@ let spawn_background_fetch dates =
             Djia.write_file (state "fetch.lock") (string_of_int (Unix.getpid ()));
             let ok =
               try
-                fetch_all dates
+                Lwt_main.run (fetch_all dates)
                 |> List.for_all (fun (_, r) -> Result.is_ok r)
               with _ -> false
             in
@@ -362,9 +366,7 @@ let run_setup () =
   Option.iter
     (fun (c : Config.t) -> Printf.printf "  Current: %.6f, %.6f %s\n" c.lat c.lon (dim ("(" ^ tilde (Config.path ()) ^ ")")))
     current;
-  let tick, clear = spinner "Looking up approximate location from your IP…" in
-  let guess = Config.guess_from_ip ~tick () in
-  clear ();
+  let guess = with_spinner "Looking up approximate location from your IP…" (Config.guess_from_ip ()) in
   (match guess with
    | Some g ->
        Printf.printf "  Your IP suggests: %s %s\n" (bold (Printf.sprintf "%.4f, %.4f" g.g_lat g.g_lon))

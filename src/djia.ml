@@ -68,21 +68,28 @@ let cached date =
 
 (* ---------- network ---------- *)
 
-let fetch_one ~tick url =
-  match Http.get ~tick url with
+open Lwt.Syntax
+
+let fetch_one url =
+  let+ r = Http.get url in
+  match r with
   | Ok (200, body) when Geo.valid_djia body -> `Value (String.trim body)
   | Ok _ -> `Answered
   | Error e -> `Failed e
 
-let fetch ?(tick = ignore) date =
+(* Tries each source in order; a value is cached forever once found. *)
+let fetch date : (string, error) result Lwt.t =
   match cached date with
-  | Some v -> Ok v
+  | Some v -> Lwt.return (Ok v)
   | None ->
       let rec go answered last_err = function
-        | [] -> Error (if answered then Not_yet_available else Unreachable last_err)
+        | [] ->
+            Lwt.return
+              (Error (if answered then Not_yet_available else Unreachable last_err))
         | src :: rest -> (
-            match fetch_one ~tick (src ^ Geo.to_path date) with
-            | `Value v -> write_file (cache_path date) v; Ok v
+            let* r = fetch_one (src ^ Geo.to_path date) in
+            match r with
+            | `Value v -> write_file (cache_path date) v; Lwt.return (Ok v)
             | `Answered -> go true last_err rest
             | `Failed e -> go answered e rest)
       in
