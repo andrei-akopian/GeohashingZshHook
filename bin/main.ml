@@ -15,6 +15,8 @@
      last_failure      timestamp of last failed background attempt (backoff) *)
 
 
+open Geohash_lib
+
 type opts = {
   mutable lat : float option;
   mutable lon : float option;
@@ -26,11 +28,17 @@ type opts = {
   mutable centicule : bool;
   mutable simple : bool;
   mutable daily : bool;
+  mutable save : bool;
 }
 
 let usage =
-  {|Usage: geohash [OPTIONS] LATITUDE LONGITUDE
+  {|Usage: geohash [OPTIONS] [LATITUDE LONGITUDE]
        geohash -g [OPTIONS]
+       geohash setup                  Interactive: pick & save your home location
+       geohash config set LAT LON     Save home location
+       geohash config show|path|clear
+
+Coordinates default to the saved home location (see `geohash setup`).
 
 Compute the xkcd geohash (https://xkcd.com/426/) for your graticule.
 
@@ -44,6 +52,7 @@ Options:
       --centicule         Keep your own tenths digit (centicule hashing)
   -s, --simple            Machine-readable output (lat, lon[, km])
       --daily             Non-blocking shell-hook mode (for .zshrc)
+      --save              Also save the given coordinates as home location
   -h, --help              Show this help
 |}
 
@@ -54,7 +63,7 @@ let parse_args argv =
   let o =
     { lat = None; lon = None; date = None; djia = None; force_east = None;
       global = false; closest = false; centicule = false; simple = false;
-      daily = false }
+      daily = false; save = false }
   in
   let positional = ref [] in
   let rec go = function
@@ -81,6 +90,7 @@ let parse_args argv =
     | "--centicule" :: rest -> o.centicule <- true; go rest
     | ("-s" | "--simple") :: rest -> o.simple <- true; go rest
     | "--daily" :: rest -> o.daily <- true; go rest
+    | "--save" :: rest -> o.save <- true; go rest
     | [ ("-d" | "--date" | "-j" | "--dow-jones" | "--30w") as f ] ->
         die "option %s needs a value" f
     | a :: rest -> (
@@ -91,7 +101,12 @@ let parse_args argv =
   in
   go (List.tl (Array.to_list argv));
   (match List.rev !positional with
-   | [] -> ()
+   | [] -> (
+       if o.save then die "--save needs LATITUDE LONGITUDE";
+       match Config.load () with
+       | Ok (Some c) -> o.lat <- Some c.lat; o.lon <- Some (if c.lon >= 180.0 then -180.0 else c.lon)
+       | Ok None -> ()
+       | Error e -> if o.daily then exit 0 else die "%s" e)
    | [ la; lo ] ->
        if la < -90.0 || la > 90.0 then die "latitude %g out of range [-90, 90]" la;
        if lo < -180.0 || lo > 180.0 then die "longitude %g out of range [-180, 180]" lo;
@@ -99,7 +114,19 @@ let parse_args argv =
        (* 180 and -180 are the same meridian; keep floor() in range *)
        o.lon <- Some (if lo >= 180.0 then -180.0 else lo)
    | _ -> die "expected exactly two coordinates: LATITUDE LONGITUDE");
-  if o.lat = None && not o.global then (print_string usage; exit 2);
+  if o.lat = None && not o.global then begin
+    if o.daily then exit 0 (* never nag or fail inside a shell rc *);
+    prerr_endline
+      "geohash: no coordinates given and no home location saved.\n\
+       Run `geohash setup` (interactive) or `geohash config set LAT LON`,\n\
+       or pass LATITUDE LONGITUDE (see --help).";
+    exit 2
+  end;
+  if o.save then begin
+    match Config.save { lat = Option.get o.lat; lon = Option.get o.lon } with
+    | Ok p -> Printf.eprintf "Saved home location to %s\n%!" p
+    | Error e -> die "%s" e
+  end;
   if o.global && o.closest then die "--global and --closest are exclusive";
   (match o.lat with
    | Some la when la >= 90.0 -> o.lat <- Some 89.999999
@@ -310,7 +337,117 @@ let run_daily o =
         Djia.write_file (state "shown") key
     | None -> spawn_background_fetch dates
 
+(* ---------- config subcommands ---------- *)
+
+let tilde p =
+  match Sys.getenv_opt "HOME" with
+  | Some h when String.length p > String.length h && String.sub p 0 (String.length h) = h ->
+      "~" ^ String.sub p (String.length h) (String.length p - String.length h)
+  | _ -> p
+
+let parse_coord_pair s =
+  (* accepts "43.66, -79.39", "43.66 -79.39" (as copied from Google Maps) *)
+  match
+    String.map (fun c -> if c = ',' then ' ' else c) s
+    |> String.split_on_char ' ' |> List.filter (( <> ) "")
+    |> List.map float_of_string_opt
+  with
+  | [ Some a; Some b ] -> Some (a, b)
+  | _ -> None
+
+let run_setup () =
+  if not (Unix.isatty Unix.stdin) then die "setup is interactive; use `geohash config set LAT LON` in scripts";
+  let current = match Config.load () with Ok c -> c | Error _ -> None in
+  print_endline (bold "📍 Geohash home location");
+  Option.iter
+    (fun (c : Config.t) -> Printf.printf "  Current: %.6f, %.6f %s\n" c.lat c.lon (dim ("(" ^ tilde (Config.path ()) ^ ")")))
+    current;
+  let tick, clear = spinner "Looking up approximate location from your IP…" in
+  let guess = Config.guess_from_ip ~tick () in
+  clear ();
+  (match guess with
+   | Some g ->
+       Printf.printf "  Your IP suggests: %s %s\n" (bold (Printf.sprintf "%.4f, %.4f" g.g_lat g.g_lon))
+         (dim (if g.place = "" then "" else "(" ^ g.place ^ ")"));
+       print_endline (dim "  IP location is approximate (city-level). For precision, paste exact\n  coordinates, e.g. right-click → copy in Google Maps.")
+   | None -> print_endline (dim "  Could not guess location from IP (offline?). Enter it manually."));
+  let default =
+    match (current, guess) with
+    | Some c, _ -> Some (c.lat, c.lon)
+    | None, Some g -> Some (g.g_lat, g.g_lon)
+    | None, None -> None
+  in
+  let read prompt =
+    print_string prompt;
+    flush stdout;
+    match In_channel.input_line stdin with
+    | Some l -> String.trim l
+    | None -> print_newline (); print_endline "Aborted, nothing saved."; exit 1
+  in
+  let rec ask label valid range def =
+    let prompt =
+      match def with
+      | Some d -> Printf.sprintf "%s [%s]: " label (Printf.sprintf "%.6f" d)
+      | None -> label ^ ": "
+    in
+    match read prompt with
+    | "" when def <> None -> `One (Option.get def)
+    | s -> (
+        match (float_of_string_opt s, parse_coord_pair s) with
+        | Some x, _ when valid x -> `One x
+        | _, Some p -> `Both p
+        | _ ->
+            Printf.printf "  %s\n" (style "31" (Printf.sprintf "Please enter a number in %s." range));
+            ask label valid range def)
+  in
+  let rec pick () =
+    let lat, lon =
+      match ask "Latitude " Config.valid_lat "[-90, 90]" (Option.map fst default) with
+      | `Both p -> p
+      | `One lat -> (
+          match ask "Longitude" Config.valid_lon "[-180, 180]" (Option.map snd default) with
+          | `One lon -> (lat, lon)
+          | `Both (_, lon) -> (lat, lon))
+    in
+    if not (Config.valid_lat lat && Config.valid_lon lon) then (
+      print_endline (style "31" "  Coordinates out of range, try again.");
+      pick ())
+    else (lat, lon)
+  in
+  let lat, lon = pick () in
+  match String.lowercase_ascii (read (Printf.sprintf "Save %.6f, %.6f? [Y/n]: " lat lon)) with
+  | "" | "y" | "yes" -> (
+      match Config.save { lat; lon } with
+      | Ok p ->
+          Printf.printf "%s Saved to %s\n" (style "32" "✓") (tilde p);
+          print_endline (dim "  Try: geohash -c    ·    shell hook: geohash --closest --daily")
+      | Error e -> die "%s" e)
+  | _ -> print_endline "Nothing saved."
+
+let run_config = function
+  | [ "set"; a; b ] -> (
+      match (float_of_string_opt a, float_of_string_opt b) with
+      | Some lat, Some lon when Config.valid_lat lat && Config.valid_lon lon -> (
+          match Config.save { lat; lon } with
+          | Ok p -> Printf.printf "Saved %.6f, %.6f to %s\n" lat lon (tilde p)
+          | Error e -> die "%s" e)
+      | _ -> die "usage: geohash config set LAT LON  (lat in [-90,90], lon in [-180,180])")
+  | [ "show" ] | [] -> (
+      match Config.load () with
+      | Ok (Some c) -> Printf.printf "%.6f %.6f\n" c.lat c.lon
+      | Ok None -> die "no home location saved (run `geohash setup`)"
+      | Error e -> die "%s" e)
+  | [ "path" ] -> print_endline (Config.path ())
+  | [ "clear" ] ->
+      (try Sys.remove (Config.path ()) with Sys_error _ -> ());
+      print_endline "Home location cleared."
+  | _ -> die "usage: geohash config [show | set LAT LON | path | clear]"
+
 let () =
-  let o = parse_args Sys.argv in
-  if o.daily then (try run_daily o with _ -> () (* never break a shell *))
-  else run_direct o
+  match Array.to_list Sys.argv with
+  | _ :: "setup" :: [] -> run_setup ()
+  | _ :: "config" :: rest -> run_config rest
+  | _ ->
+      let o = parse_args Sys.argv in
+      if o.daily then (try run_daily o with _ -> () (* never break a shell *))
+      else run_direct o

@@ -1,0 +1,3 @@
+(library
+ (name geohash_lib)
+ (libraries unix))

@@ -1,4 +1,5 @@
 (executable
- (name geohash)
+ (name main)
  (public_name geohash)
- (libraries unix))
+ (package geohash)
+ (libraries geohash_lib unix))

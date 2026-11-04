@@ -66,56 +66,13 @@ let cached date =
   | Some s when Geo.valid_djia s -> Some (String.trim s)
   | _ -> None
 
-(* ---------- network ----------
-   HTTP is done by a curl subprocess whose output we poll with select(),
-   calling [tick] every ~80ms so the caller can animate a spinner (or
-   simply do nothing in background mode). No blocking reads. *)
-
-let timeout_s = 5
+(* ---------- network ---------- *)
 
 let fetch_one ~tick url =
-  match
-    let r, w = Unix.pipe ~cloexec:true () in
-    let null = Unix.openfile "/dev/null" [ O_RDWR ] 0 in
-    let pid =
-      Unix.create_process "curl"
-        [| "curl"; "-sS"; "-L"; "-m"; string_of_int timeout_s;
-           "-w"; "\n%{http_code}"; url |]
-        null w null
-    in
-    Unix.close w;
-    Unix.close null;
-    (r, pid)
-  with
-  | exception Unix.Unix_error (e, _, _) -> `Failed (Unix.error_message e)
-  | r, pid ->
-      let buf = Buffer.create 64 and chunk = Bytes.create 4096 in
-      let rec loop () =
-        tick ();
-        match Unix.select [ r ] [] [] 0.08 with
-        | [], _, _ -> loop ()
-        | _ ->
-            let n = Unix.read r chunk 0 4096 in
-            if n > 0 then (Buffer.add_subbytes buf chunk 0 n; loop ())
-        | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop ()
-      in
-      (try loop () with Unix.Unix_error _ -> ());
-      Unix.close r;
-      let _, status = Unix.waitpid [] pid in
-      let out = Buffer.contents buf in
-      match status with
-      | Unix.WEXITED 0 -> (
-          match String.rindex_opt out '\n' with
-          | None -> `Answered
-          | Some i ->
-              let body = String.sub out 0 i in
-              let code = String.trim (String.sub out (i + 1) (String.length out - i - 1)) in
-              if code = "200" && Geo.valid_djia body then `Value (String.trim body)
-              else `Answered)
-      | Unix.WEXITED 28 -> `Failed "timed out"
-      | Unix.WEXITED 127 -> `Failed "curl not found"
-      | Unix.WEXITED n -> `Failed (Printf.sprintf "curl exit %d" n)
-      | _ -> `Failed "curl killed"
+  match Http.get ~tick url with
+  | Ok (200, body) when Geo.valid_djia body -> `Value (String.trim body)
+  | Ok _ -> `Answered
+  | Error e -> `Failed e
 
 let fetch ?(tick = ignore) date =
   match cached date with
