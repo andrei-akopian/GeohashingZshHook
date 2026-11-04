@@ -1,15 +1,32 @@
 # GeohashFetcher
 
 > [!WARNING] 
-> This tool is made with LLM. Author has less than used it less than _1_ times so far.
+> Made with LLM. Author has used it at most _1_ times so far.
 
 Calculator for xkcd [geohashing game](https://geohashing.site/) in the terminal, written in OCaml by Opus 5.5. Idea of the game is to travel to random coordinates every day (the same of all users based on the day's Dow Jones index values).
 
-The tool is lightweight and intended to be triggered from `.zshrc` every time a terminal is opened. Caching is used to limit resource use.
+The tool is lightweight and intended to be triggered from `.zshrc` every time a terminal is opened. Caching is used to limit resource use. While `.zshrc` is used for triggering, the output is shown only once on second terminal opening (to avoid slowing down terminal startup).
 
 ---
 
 Networking uses [`http-lwt-client`](https://github.com/robur-coop/http-lwt-client) (pure-OCaml TLS, system CA store, redirects) on top of `lwt`, so fetches are asynchronous with a live spinner and a hard 5 s timeout per request.
+
+## Shell hook (non-blocking)
+
+Add to `~/.zshrc`:
+
+```sh
+geohash --closest --daily   # uses saved home location; silent if none
+```
+
+`--daily` never waits on the network. State machine, stored in
+`${XDG_CACHE_HOME:-~/.cache}/geohashing`:
+
+1. **already shown** today's hash for these coordinates → print nothing.
+2. **all DJIA values cached** → print the hash, mark it shown.
+3. **otherwise** → fork a detached background fetcher (lock file prevents
+   duplicates; a failed attempt backs off 5 min) and return immediately.
+   The next terminal you open shows the result.
 
 ## Building and installing
 
@@ -137,23 +154,6 @@ geohash 51.5 -0.1 -d 2008-05-30      # explicit place & date
 geohash 37.4 -122.1 -d 2005-05-26 -j 10458.68   # offline, DJIA given manually
 geohash --centicule -s               # centicule, machine-readable
 ```
-
-## Shell hook (non-blocking)
-
-Add to `~/.zshrc`:
-
-```sh
-geohash --closest --daily   # uses saved home location; silent if none
-```
-
-`--daily` never waits on the network. State machine, stored in
-`${XDG_CACHE_HOME:-~/.cache}/geohashing`:
-
-1. **already shown** today's hash for these coordinates → print nothing.
-2. **all DJIA values cached** → print the hash, mark it shown.
-3. **otherwise** → fork a detached background fetcher (lock file prevents
-   duplicates; a failed attempt backs off 5 min) and return immediately.
-   The next terminal you open shows the result.
 
 ## Edge cases handled
 
