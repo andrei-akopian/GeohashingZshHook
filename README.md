@@ -1,6 +1,7 @@
 # GeohashFetcher
 
-> [!WARNING] This tool is made with LLM. Author has less than used it less than _1_ times so far.
+> [!WARNING] 
+> This tool is made with LLM. Author has less than used it less than _1_ times so far.
 
 Calculator for xkcd [geohashing game](https://geohashing.site/) in the terminal, written in OCaml by Opus 5.5. Idea of the game is to travel to random coordinates every day (the same of all users based on the day's Dow Jones index values).
 
