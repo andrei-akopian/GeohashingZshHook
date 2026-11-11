@@ -74,6 +74,14 @@ dune build --profile release      # optimised, warnings not fatal
 ./_build/default/bin/main.exe --help
 ```
 
+If errors about MacOS sdk or linking show up:
+
+```sh
+export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
+export LIBRARY_PATH=/opt/homebrew/lib
+dune build
+```
+
 ### 4. Put `geohash` on your PATH
 
 Pick **one**:
